@@ -1,0 +1,1569 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>ドラゴンディフェンス！</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  background: #1a1a2e;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+body {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-family: 'Segoe UI', 'Yu Gothic UI', sans-serif;
+}
+#gameContainer {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 0 40px rgba(100, 200, 255, 0.3);
+}
+canvas {
+  display: block;
+  cursor: pointer;
+}
+</style>
+</head>
+<body>
+<div id="gameContainer">
+  <canvas id="gameCanvas" width="960" height="580"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// ======== AUDIO ENGINE ========
+let audioCtx = null;
+function getAudioCtx() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function playTone(freq, duration, type, volume, ramp) {
+  const ac = getAudioCtx();
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.setValueAtTime(freq, ac.currentTime);
+  if (ramp) osc.frequency.exponentialRampToValueAtTime(ramp, ac.currentTime + duration);
+  gain.gain.setValueAtTime(volume || 0.15, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + duration);
+  osc.connect(gain);
+  gain.connect(ac.destination);
+  osc.start(ac.currentTime);
+  osc.stop(ac.currentTime + duration);
+}
+
+function playNoise(duration, volume) {
+  const ac = getAudioCtx();
+  const bufferSize = ac.sampleRate * duration;
+  const buffer = ac.createBuffer(1, bufferSize, ac.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+  const source = ac.createBufferSource();
+  source.buffer = buffer;
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(volume || 0.1, ac.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + duration);
+  const filter = ac.createBiquadFilter();
+  filter.type = 'highpass';
+  filter.frequency.value = 2000;
+  source.connect(filter);
+  filter.connect(gain);
+  gain.connect(ac.destination);
+  source.start();
+}
+
+let lastSfxTime = {};
+function throttleSfx(name, minInterval) {
+  const now = performance.now();
+  if (lastSfxTime[name] && now - lastSfxTime[name] < minInterval) return false;
+  lastSfxTime[name] = now;
+  return true;
+}
+
+const SFX = {
+  spawn() {
+    playTone(400, 0.12, 'sine', 0.15, 800);
+    playTone(600, 0.1, 'sine', 0.1, 900);
+  },
+  attack() {
+    if (!throttleSfx('attack', 80)) return;
+    playNoise(0.06, 0.06);
+    playTone(200, 0.08, 'square', 0.04, 100);
+  },
+  enemyDie() {
+    if (!throttleSfx('enemyDie', 100)) return;
+    playTone(500, 0.1, 'sine', 0.12, 200);
+    playTone(300, 0.15, 'sine', 0.08, 100);
+    playNoise(0.08, 0.05);
+  },
+  dragonDie() {
+    if (!throttleSfx('dragonDie', 100)) return;
+    playTone(300, 0.15, 'sawtooth', 0.1, 80);
+    playTone(200, 0.2, 'sine', 0.08, 60);
+  },
+  baseHit() {
+    if (!throttleSfx('baseHit', 200)) return;
+    playTone(80, 0.2, 'sine', 0.18, 40);
+    playNoise(0.1, 0.1);
+  },
+  money() {
+    playTone(800, 0.06, 'sine', 0.06, 1200);
+  },
+  win() {
+    setTimeout(() => playTone(523, 0.2, 'sine', 0.15), 0);
+    setTimeout(() => playTone(659, 0.2, 'sine', 0.15), 150);
+    setTimeout(() => playTone(784, 0.2, 'sine', 0.15), 300);
+    setTimeout(() => playTone(1047, 0.4, 'sine', 0.18), 450);
+  },
+  lose() {
+    setTimeout(() => playTone(400, 0.3, 'sawtooth', 0.12, 200), 0);
+    setTimeout(() => playTone(300, 0.3, 'sawtooth', 0.12, 150), 250);
+    setTimeout(() => playTone(200, 0.5, 'sawtooth', 0.15, 80), 500);
+  },
+  click() {
+    playTone(600, 0.05, 'sine', 0.08, 800);
+  },
+  cantAfford() {
+    playTone(200, 0.1, 'square', 0.08, 150);
+    playTone(160, 0.15, 'square', 0.06, 100);
+  },
+  bgmTimer: null,
+  bgmPlaying: false,
+  startBGM() {
+    if (this.bgmPlaying) return;
+    this.bgmPlaying = true;
+    const melody = [
+      [392,0.2],[440,0.2],[523,0.2],[440,0.2],
+      [392,0.2],[349,0.2],[330,0.2],[349,0.2],
+      [392,0.2],[440,0.2],[523,0.2],[587,0.2],
+      [523,0.4],[440,0.2],[392,0.4],
+    ];
+    let beatIdx = 0;
+    const ac = getAudioCtx();
+    const playNext = () => {
+      if (!this.bgmPlaying) return;
+      const [freq, dur] = melody[beatIdx % melody.length];
+      playTone(freq, dur * 0.9, 'sine', 0.05);
+      playTone(freq / 2, dur * 0.9, 'triangle', 0.03);
+      beatIdx++;
+      this.bgmTimer = setTimeout(playNext, dur * 1000 * 1.8);
+    };
+    playNext();
+  },
+  stopBGM() {
+    this.bgmPlaying = false;
+    if (this.bgmTimer) { clearTimeout(this.bgmTimer); this.bgmTimer = null; }
+  }
+};
+
+// ======== UNIT DEFINITIONS ========
+const DRAGON_TYPES = [
+  { id: 'baby', name: 'ベビー', cost: 75, hp: 200, atk: 35, range: 70, speed: 2.2, cooldown: 0.8, spawnCd: 1.0, w: 40, h: 40, color: '#66BB6A', desc: '安くて速い！' },
+  { id: 'wind', name: 'ウィンド', cost: 150, hp: 150, atk: 28, range: 65, speed: 3.5, cooldown: 0.5, spawnCd: 0.8, w: 36, h: 36, color: '#80CBC4', desc: '超高速！' },
+  { id: 'fire', name: 'ファイア', cost: 250, hp: 400, atk: 90, range: 90, speed: 1.6, cooldown: 1.1, spawnCd: 2.0, w: 48, h: 48, color: '#EF5350', desc: '炎の力！' },
+  { id: 'ice', name: 'アイス', cost: 300, hp: 700, atk: 45, range: 80, speed: 1.0, cooldown: 1.4, spawnCd: 2.5, w: 52, h: 52, color: '#42A5F5', desc: '硬い壁役！' },
+  { id: 'poison', name: 'ポイズン', cost: 400, hp: 350, atk: 110, range: 160, speed: 1.2, cooldown: 1.8, spawnCd: 3.0, w: 46, h: 46, color: '#9C27B0', desc: '毒の息！' },
+  { id: 'thunder', name: 'サンダー', cost: 600, hp: 250, atk: 180, range: 220, speed: 1.3, cooldown: 2.0, spawnCd: 4.0, w: 44, h: 44, color: '#FFC107', desc: '遠距離砲撃！' },
+  { id: 'elder', name: 'エルダー', cost: 1500, hp: 1200, atk: 250, range: 130, speed: 0.8, cooldown: 1.6, spawnCd: 8.0, w: 60, h: 60, color: '#AB47BC', desc: '最強の長老！' },
+  { id: 'holy', name: 'ホーリー', cost: 1500, hp: 1800, atk: 320, range: 150, speed: 0.9, cooldown: 1.4, spawnCd: 10.0, w: 64, h: 64, color: '#FFD700', desc: '神聖なる力！' },
+];
+
+const ENEMY_TYPES = {
+  slime:   { name: 'スライム', hp: 150, atk: 20, range: 60, speed: 1.5, cooldown: 1.0, w: 32, h: 28, color: '#81C784', money: 30 },
+  goblin:  { name: 'ゴブリン', hp: 200, atk: 45, range: 65, speed: 2.8, cooldown: 0.9, w: 34, h: 38, color: '#A5D6A7', money: 50 },
+  knight:  { name: 'ナイト', hp: 600, atk: 70, range: 70, speed: 1.0, cooldown: 1.3, w: 42, h: 48, color: '#90A4AE', money: 80 },
+  mage:    { name: 'ダークメイジ', hp: 300, atk: 130, range: 200, speed: 0.9, cooldown: 2.2, w: 36, h: 44, color: '#7E57C2', money: 100 },
+  golem:   { name: 'ゴーレム', hp: 3000, atk: 200, range: 80, speed: 0.5, cooldown: 2.0, w: 64, h: 64, color: '#8D6E63', money: 300 },
+  dragon:  { name: 'ダークドラゴン', hp: 5000, atk: 300, range: 120, speed: 0.6, cooldown: 1.8, w: 70, h: 70, color: '#37474F', money: 500 },
+};
+
+// ======== STAGES ========
+const STAGES = [
+  {
+    name: '草原ステージ', bg: ['#87CEEB','#5BA3D9'], ground: '#7CB342',
+    baseHp: 4000,
+    waves: [
+      { time: 1, type: 'slime', count: 4, interval: 2.5 },
+      { time: 8, type: 'slime', count: 3, interval: 2 },
+      { time: 15, type: 'goblin', count: 3, interval: 3 },
+      { time: 25, type: 'slime', count: 5, interval: 1.5 },
+      { time: 35, type: 'goblin', count: 4, interval: 2 },
+      { time: 45, type: 'knight', count: 1, interval: 1 },
+    ]
+  },
+  {
+    name: '森林ステージ', bg: ['#4CAF50','#2E7D32'], ground: '#558B2F',
+    baseHp: 7000,
+    waves: [
+      { time: 1, type: 'goblin', count: 5, interval: 2 },
+      { time: 10, type: 'knight', count: 2, interval: 4 },
+      { time: 18, type: 'slime', count: 8, interval: 1 },
+      { time: 28, type: 'goblin', count: 4, interval: 1.5 },
+      { time: 35, type: 'knight', count: 3, interval: 3 },
+      { time: 45, type: 'mage', count: 2, interval: 4 },
+      { time: 55, type: 'knight', count: 2, interval: 3 },
+    ]
+  },
+  {
+    name: '洞窟ステージ', bg: ['#546E7A','#37474F'], ground: '#4E342E',
+    baseHp: 9000,
+    waves: [
+      { time: 1, type: 'goblin', count: 4, interval: 2.5 },
+      { time: 12, type: 'mage', count: 1, interval: 3 },
+      { time: 20, type: 'knight', count: 2, interval: 3.5 },
+      { time: 32, type: 'mage', count: 2, interval: 3.5 },
+      { time: 42, type: 'slime', count: 6, interval: 1.5 },
+      { time: 52, type: 'knight', count: 2, interval: 3 },
+      { time: 58, type: 'mage', count: 2, interval: 3 },
+      { time: 68, type: 'golem', count: 1, interval: 1 },
+    ]
+  },
+  {
+    name: '火山ステージ', bg: ['#BF360C','#D84315'], ground: '#3E2723',
+    baseHp: 18000,
+    waves: [
+      { time: 1, type: 'knight', count: 4, interval: 2 },
+      { time: 10, type: 'mage', count: 3, interval: 2 },
+      { time: 18, type: 'goblin', count: 10, interval: 0.7 },
+      { time: 28, type: 'golem', count: 1, interval: 1 },
+      { time: 32, type: 'knight', count: 5, interval: 1.5 },
+      { time: 42, type: 'mage', count: 4, interval: 2 },
+      { time: 52, type: 'golem', count: 2, interval: 5 },
+      { time: 62, type: 'knight', count: 6, interval: 1 },
+      { time: 70, type: 'mage', count: 3, interval: 1.5 },
+    ]
+  },
+  {
+    name: '魔王城ステージ', bg: ['#1A237E','#0D47A1'], ground: '#263238',
+    baseHp: 25000,
+    waves: [
+      { time: 1, type: 'knight', count: 5, interval: 1.5 },
+      { time: 10, type: 'mage', count: 4, interval: 2 },
+      { time: 20, type: 'golem', count: 2, interval: 4 },
+      { time: 30, type: 'goblin', count: 15, interval: 0.5 },
+      { time: 40, type: 'knight', count: 6, interval: 1 },
+      { time: 50, type: 'mage', count: 5, interval: 1.5 },
+      { time: 60, type: 'golem', count: 2, interval: 3 },
+      { time: 70, type: 'dragon', count: 1, interval: 1 },
+      { time: 75, type: 'knight', count: 8, interval: 0.8 },
+      { time: 85, type: 'dragon', count: 2, interval: 6 },
+    ]
+  },
+];
+
+// ======== GAME STATE ========
+let game = {
+  state: 'title',
+  stageIndex: 0,
+  clearedStages: 0,
+  money: 0,
+  moneyRate: 40,
+  maxMoney: 5000,
+  playerBase: { hp: 10000, maxHp: 10000 },
+  enemyBase: { hp: 5000, maxHp: 5000 },
+  playerUnits: [],
+  enemyUnits: [],
+  particles: [],
+  dmgNumbers: [],
+  spawnCooldowns: [0,0,0,0,0,0,0,0],
+  waveTimers: [],
+  stageTime: 0,
+  shakeX: 0, shakeY: 0,
+  lastTime: 0,
+};
+
+const GROUND_Y = 410;
+const BASE_LEFT_X = 60;
+const BASE_RIGHT_X = 900;
+const FIELD_LEFT = 90;
+const FIELD_RIGHT = 870;
+const PANEL_Y = 455;
+
+// ======== DRAWING HELPERS ========
+function drawRoundRect(x, y, w, h, r, fill, stroke) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.stroke(); }
+}
+
+function lerpColor(a, b, t) {
+  const ah = parseInt(a.replace('#',''), 16);
+  const bh = parseInt(b.replace('#',''), 16);
+  const ar = (ah >> 16) & 0xFF, ag = (ah >> 8) & 0xFF, ab = ah & 0xFF;
+  const br = (bh >> 16) & 0xFF, bg = (bh >> 8) & 0xFF, bb = bh & 0xFF;
+  const rr = Math.round(ar + (br - ar) * t);
+  const rg = Math.round(ag + (bg - ag) * t);
+  const rb = Math.round(ab + (bb - ab) * t);
+  return `rgb(${rr},${rg},${rb})`;
+}
+
+// ======== DRAGON DRAWING ========
+function drawDragon(x, y, type, dir, frame, hp, maxHp) {
+  const s = type.w / 40;
+  const bounce = Math.sin(frame * 0.15) * 2;
+  const wingFlap = Math.sin(frame * 0.2) * 0.3;
+
+  ctx.save();
+  ctx.translate(x, y + bounce);
+
+  const c = type.color;
+  const dark = shadeColor(c, -30);
+  const light = shadeColor(c, 40);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, 18 * s, 16 * s, 5 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Tail
+  ctx.strokeStyle = dark;
+  ctx.lineWidth = 4 * s;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-dir * 12 * s, 5 * s);
+  ctx.quadraticCurveTo(-dir * 22 * s, -2 * s, -dir * 28 * s, -8 * s + Math.sin(frame * 0.1) * 3);
+  ctx.stroke();
+  // Tail tip
+  ctx.fillStyle = light;
+  ctx.beginPath();
+  const tx = -dir * 28 * s, ty = -8 * s + Math.sin(frame * 0.1) * 3;
+  ctx.moveTo(tx, ty - 4 * s);
+  ctx.lineTo(tx - dir * 5 * s, ty);
+  ctx.lineTo(tx, ty + 4 * s);
+  ctx.closePath();
+  ctx.fill();
+
+  // Wings
+  ctx.fillStyle = light;
+  ctx.globalAlpha = 0.8;
+  ctx.save();
+  ctx.translate(-dir * 2 * s, -8 * s);
+  ctx.rotate(wingFlap * dir);
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(-dir * 8 * s, -18 * s, -dir * 2 * s, -22 * s);
+  ctx.quadraticCurveTo(dir * 4 * s, -16 * s, dir * 2 * s, -8 * s);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  ctx.globalAlpha = 1;
+
+  // Body
+  ctx.fillStyle = c;
+  ctx.beginPath();
+  ctx.ellipse(0, 4 * s, 14 * s, 12 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = light;
+  ctx.beginPath();
+  ctx.ellipse(dir * 2 * s, 8 * s, 9 * s, 6 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs
+  ctx.fillStyle = dark;
+  const legOff = Math.sin(frame * 0.15) * 3;
+  ctx.beginPath(); ctx.ellipse(-6 * s, 14 * s + legOff, 4 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6 * s, 14 * s - legOff, 4 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Head
+  ctx.fillStyle = c;
+  ctx.beginPath();
+  ctx.arc(dir * 14 * s, -6 * s, 10 * s, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Horns
+  ctx.fillStyle = '#FFF59D';
+  ctx.beginPath();
+  ctx.moveTo(dir * 10 * s, -14 * s);
+  ctx.lineTo(dir * 8 * s, -22 * s);
+  ctx.lineTo(dir * 14 * s, -14 * s);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(dir * 16 * s, -14 * s);
+  ctx.lineTo(dir * 17 * s, -20 * s);
+  ctx.lineTo(dir * 20 * s, -13 * s);
+  ctx.closePath();
+  ctx.fill();
+
+  // Snout
+  ctx.fillStyle = light;
+  ctx.beginPath();
+  ctx.ellipse(dir * 20 * s, -3 * s, 5 * s, 4 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nostrils
+  ctx.fillStyle = dark;
+  ctx.beginPath();
+  ctx.arc(dir * 22 * s, -4 * s, 1.2 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(dir * 22 * s, -1 * s, 1.2 * s, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.ellipse(dir * 17 * s, -9 * s, 5 * s, 5.5 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#263238';
+  ctx.beginPath();
+  ctx.arc(dir * 18.5 * s, -8.5 * s, 3 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(dir * 19.5 * s, -9.5 * s, 1.2 * s, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth (cute smile)
+  ctx.strokeStyle = dark;
+  ctx.lineWidth = 1.5 * s;
+  ctx.beginPath();
+  ctx.arc(dir * 20 * s, -2 * s, 3 * s, 0.1, Math.PI * 0.9);
+  ctx.stroke();
+
+  // Fire breath for fire dragon
+  if (type.id === 'fire' && Math.random() > 0.7) {
+    ctx.fillStyle = 'rgba(255,100,0,0.5)';
+    ctx.beginPath();
+    ctx.arc(dir * 26 * s, -3 * s, 3 + Math.random() * 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Wind swirls for wind dragon
+  if (type.id === 'wind') {
+    ctx.strokeStyle = 'rgba(200,255,250,0.5)';
+    ctx.lineWidth = 1.5;
+    for (let i = 0; i < 3; i++) {
+      const angle = frame * 0.12 + (i / 3) * Math.PI * 2;
+      const rx = Math.cos(angle) * 14 * s;
+      const ry = Math.sin(angle) * 8 * s;
+      ctx.beginPath();
+      ctx.arc(rx, ry - 2 * s, 3 * s, 0, Math.PI);
+      ctx.stroke();
+    }
+  }
+
+  // Ice crystals for ice dragon
+  if (type.id === 'ice') {
+    ctx.fillStyle = 'rgba(200,230,255,0.6)';
+    for (let i = 0; i < 3; i++) {
+      const angle = (i / 3) * Math.PI * 2 + frame * 0.02;
+      ctx.beginPath();
+      ctx.rect(-3 * s + Math.cos(angle) * 18 * s, -10 * s + Math.sin(angle) * 10 * s, 3 * s, 3 * s);
+      ctx.fill();
+    }
+  }
+
+  // Poison bubbles for poison dragon
+  if (type.id === 'poison') {
+    ctx.fillStyle = 'rgba(180,0,255,0.4)';
+    for (let i = 0; i < 4; i++) {
+      const bx = dir * (20 + i * 4) * s + Math.sin(frame * 0.08 + i) * 3;
+      const by = (-6 + Math.cos(frame * 0.1 + i * 2) * 4) * s;
+      const br = (2 + Math.sin(frame * 0.06 + i) * 1) * s;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.strokeStyle = 'rgba(130,0,200,0.3)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 4; i++) {
+      const bx = dir * (20 + i * 4) * s + Math.sin(frame * 0.08 + i) * 3;
+      const by = (-6 + Math.cos(frame * 0.1 + i * 2) * 4) * s;
+      const br = (2 + Math.sin(frame * 0.06 + i) * 1) * s;
+      ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // Lightning for thunder dragon
+  if (type.id === 'thunder' && frame % 20 < 5) {
+    ctx.strokeStyle = '#FFEB3B';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(dir * 10 * s, -20 * s);
+    ctx.lineTo(dir * 12 * s, -26 * s);
+    ctx.lineTo(dir * 8 * s, -24 * s);
+    ctx.lineTo(dir * 11 * s, -30 * s);
+    ctx.stroke();
+  }
+
+  // Crown/aura for elder dragon
+  if (type.id === 'elder') {
+    ctx.strokeStyle = 'rgba(255,215,0,0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, -2 * s, 22 * s + Math.sin(frame * 0.05) * 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Holy glow for holy dragon
+  if (type.id === 'holy') {
+    ctx.shadowColor = '#FFD700';
+    ctx.shadowBlur = 15 + Math.sin(frame * 0.06) * 5;
+    ctx.fillStyle = 'rgba(255,215,0,0.15)';
+    ctx.beginPath();
+    ctx.arc(0, -2 * s, 26 * s, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // Halo
+    ctx.strokeStyle = 'rgba(255,235,100,0.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(dir * 14 * s, -20 * s, 8 * s, 3 * s, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // Sparkles
+    for (let i = 0; i < 4; i++) {
+      const angle = frame * 0.04 + (i / 4) * Math.PI * 2;
+      const sx = Math.cos(angle) * 20 * s;
+      const sy = Math.sin(angle) * 12 * s - 4 * s;
+      ctx.fillStyle = `rgba(255,255,200,${0.4 + Math.sin(frame * 0.1 + i) * 0.3})`;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 3 * s); ctx.lineTo(sx + 1.5 * s, sy); ctx.lineTo(sx, sy + 3 * s); ctx.lineTo(sx - 1.5 * s, sy);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  ctx.restore();
+
+  // HP bar
+  if (hp < maxHp) {
+    const bw = 30 * s;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(x - bw/2, y - 22 * s + bounce, bw, 4);
+    ctx.fillStyle = hp/maxHp > 0.5 ? '#4CAF50' : hp/maxHp > 0.25 ? '#FFC107' : '#F44336';
+    ctx.fillRect(x - bw/2, y - 22 * s + bounce, bw * (hp/maxHp), 4);
+  }
+}
+
+// ======== ENEMY DRAWING ========
+function drawEnemy(x, y, type, dir, frame, hp, maxHp) {
+  const s = type.w / 36;
+  const bounce = Math.sin(frame * 0.12) * 2;
+  ctx.save();
+  ctx.translate(x, y + bounce);
+
+  const c = type.color;
+  const dark = shadeColor(c, -30);
+  const light = shadeColor(c, 40);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath();
+  ctx.ellipse(0, 15 * s, 14 * s, 4 * s, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (type === ENEMY_TYPES.slime) {
+    // Slime - bouncy blob
+    const squish = 1 + Math.sin(frame * 0.15) * 0.1;
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.ellipse(0, 4 * s, 14 * s * squish, 12 * s / squish, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = light;
+    ctx.beginPath();
+    ctx.ellipse(-3 * s, 0, 6 * s, 5 * s, -0.3, 0, Math.PI * 2);
+    ctx.fill();
+    // Eyes
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(dir * 5 * s, -3 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(dir * -3 * s, -3 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#1B5E20';
+    ctx.beginPath(); ctx.arc(dir * 6 * s, -2 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(dir * -2 * s, -2 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(dir * 6.5 * s, -3 * s, 0.8 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(dir * -1.5 * s, -3 * s, 0.8 * s, 0, Math.PI * 2); ctx.fill();
+  } else if (type === ENEMY_TYPES.goblin) {
+    // Body
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.ellipse(0, 4 * s, 10 * s, 12 * s, 0, 0, Math.PI * 2); ctx.fill();
+    // Ears
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.moveTo(-8 * s, -6 * s); ctx.lineTo(-16 * s, -14 * s); ctx.lineTo(-4 * s, -10 * s);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(8 * s, -6 * s); ctx.lineTo(16 * s, -14 * s); ctx.lineTo(4 * s, -10 * s);
+    ctx.closePath(); ctx.fill();
+    // Face
+    ctx.fillStyle = light;
+    ctx.beginPath(); ctx.ellipse(0, 0, 8 * s, 7 * s, 0, 0, Math.PI * 2); ctx.fill();
+    // Eyes (angry)
+    ctx.fillStyle = '#F44336';
+    ctx.beginPath(); ctx.arc(dir * 3 * s, -2 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(dir * -3 * s, -2 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'black';
+    ctx.beginPath(); ctx.arc(dir * 3.5 * s, -1.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(dir * -2.5 * s, -1.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    // Mouth
+    ctx.strokeStyle = '#1B5E20';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, 4 * s, 4 * s, 0, Math.PI); ctx.stroke();
+    // Legs
+    const lo = Math.sin(frame * 0.2) * 3;
+    ctx.fillStyle = dark;
+    ctx.beginPath(); ctx.ellipse(-4 * s, 14 * s + lo, 3 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4 * s, 14 * s - lo, 3 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (type === ENEMY_TYPES.knight) {
+    // Body (armor)
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.ellipse(0, 2 * s, 12 * s, 14 * s, 0, 0, Math.PI * 2); ctx.fill();
+    // Helmet
+    ctx.fillStyle = '#78909C';
+    ctx.beginPath(); ctx.arc(0, -8 * s, 10 * s, Math.PI, 0); ctx.fill();
+    ctx.fillRect(-10 * s, -8 * s, 20 * s, 3 * s);
+    // Visor slit
+    ctx.fillStyle = '#263238';
+    ctx.fillRect(-6 * s, -7 * s, 12 * s, 3 * s);
+    // Red eyes behind visor
+    ctx.fillStyle = '#F44336';
+    ctx.beginPath(); ctx.arc(-3 * s, -5.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(3 * s, -5.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    // Shield
+    ctx.fillStyle = '#546E7A';
+    ctx.beginPath();
+    ctx.moveTo(-dir * 10 * s, -4 * s);
+    ctx.lineTo(-dir * 18 * s, -2 * s);
+    ctx.lineTo(-dir * 18 * s, 8 * s);
+    ctx.lineTo(-dir * 10 * s, 12 * s);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#B71C1C';
+    ctx.beginPath(); ctx.arc(-dir * 14 * s, 3 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    // Sword
+    ctx.fillStyle = '#CFD8DC';
+    ctx.save();
+    ctx.translate(dir * 12 * s, -2 * s);
+    ctx.rotate(dir * (0.5 + Math.sin(frame * 0.1) * 0.2));
+    ctx.fillRect(-1.5 * s, -16 * s, 3 * s, 16 * s);
+    ctx.fillStyle = '#8D6E63';
+    ctx.fillRect(-3 * s, 0, 6 * s, 4 * s);
+    ctx.restore();
+    // Legs
+    ctx.fillStyle = '#607D8B';
+    ctx.beginPath(); ctx.ellipse(-4 * s, 14 * s, 4 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(4 * s, 14 * s, 4 * s, 5 * s, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (type === ENEMY_TYPES.mage) {
+    // Robe
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(-10 * s, -6 * s);
+    ctx.lineTo(-14 * s, 14 * s);
+    ctx.lineTo(14 * s, 14 * s);
+    ctx.lineTo(10 * s, -6 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Hood
+    ctx.fillStyle = dark;
+    ctx.beginPath(); ctx.arc(0, -6 * s, 10 * s, Math.PI, 0); ctx.fill();
+    ctx.fillRect(-10 * s, -6 * s, 20 * s, 6 * s);
+    // Glowing eyes
+    ctx.shadowColor = '#E040FB';
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = '#E040FB';
+    ctx.beginPath(); ctx.arc(-3 * s, -4 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(3 * s, -4 * s, 2 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Staff
+    ctx.fillStyle = '#5D4037';
+    ctx.fillRect(dir * 12 * s, -20 * s, 2.5 * s, 34 * s);
+    // Orb
+    ctx.fillStyle = '#E040FB';
+    ctx.shadowColor = '#E040FB';
+    ctx.shadowBlur = 10;
+    ctx.beginPath();
+    ctx.arc(dir * 13.2 * s, -22 * s, 4 * s + Math.sin(frame * 0.1) * 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  } else if (type === ENEMY_TYPES.golem) {
+    // Body (rocky)
+    ctx.fillStyle = c;
+    ctx.beginPath();
+    ctx.moveTo(-16 * s, -8 * s);
+    ctx.lineTo(-20 * s, 12 * s);
+    ctx.lineTo(20 * s, 12 * s);
+    ctx.lineTo(16 * s, -8 * s);
+    ctx.closePath();
+    ctx.fill();
+    // Cracks
+    ctx.strokeStyle = dark;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-8 * s, -4 * s); ctx.lineTo(-4 * s, 4 * s); ctx.lineTo(-10 * s, 10 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(6 * s, -2 * s); ctx.lineTo(10 * s, 6 * s); ctx.stroke();
+    // Head
+    ctx.fillStyle = shadeColor(c, 10);
+    ctx.beginPath(); ctx.arc(0, -12 * s, 12 * s, 0, Math.PI * 2); ctx.fill();
+    // Eyes (glowing)
+    ctx.fillStyle = '#FF6F00';
+    ctx.shadowColor = '#FF6F00';
+    ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(-5 * s, -13 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5 * s, -13 * s, 3 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Mouth
+    ctx.fillStyle = '#3E2723';
+    ctx.beginPath();
+    ctx.moveTo(-6 * s, -6 * s); ctx.lineTo(0, -4 * s); ctx.lineTo(6 * s, -6 * s);
+    ctx.lineTo(4 * s, -3 * s); ctx.lineTo(-4 * s, -3 * s);
+    ctx.closePath(); ctx.fill();
+    // Arms
+    ctx.fillStyle = c;
+    const armSwing = Math.sin(frame * 0.08) * 0.2;
+    ctx.save();
+    ctx.translate(-18 * s, -4 * s); ctx.rotate(-0.3 + armSwing);
+    ctx.fillRect(-4 * s, 0, 8 * s, 18 * s);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(18 * s, -4 * s); ctx.rotate(0.3 - armSwing);
+    ctx.fillRect(-4 * s, 0, 8 * s, 18 * s);
+    ctx.restore();
+  } else if (type === ENEMY_TYPES.dragon) {
+    // Dark Dragon - similar to player dragons but evil
+    ctx.fillStyle = c;
+    ctx.beginPath(); ctx.ellipse(0, 2 * s, 18 * s, 16 * s, 0, 0, Math.PI * 2); ctx.fill();
+    // Wings (big, dark)
+    ctx.fillStyle = 'rgba(30,30,30,0.8)';
+    const wf = Math.sin(frame * 0.08) * 0.3;
+    ctx.save(); ctx.translate(0, -10 * s); ctx.rotate(wf);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-20 * s, -28 * s, -8 * s, -32 * s);
+    ctx.quadraticCurveTo(4 * s, -22 * s, 6 * s, -10 * s);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    ctx.save(); ctx.translate(0, -10 * s); ctx.rotate(-wf);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(20 * s, -28 * s, 8 * s, -32 * s);
+    ctx.quadraticCurveTo(-4 * s, -22 * s, -6 * s, -10 * s);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+    // Head
+    ctx.fillStyle = dark;
+    ctx.beginPath(); ctx.arc(dir * 16 * s, -10 * s, 12 * s, 0, Math.PI * 2); ctx.fill();
+    // Horns (menacing)
+    ctx.fillStyle = '#B71C1C';
+    ctx.beginPath();
+    ctx.moveTo(dir * 10 * s, -18 * s); ctx.lineTo(dir * 6 * s, -32 * s); ctx.lineTo(dir * 16 * s, -20 * s);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(dir * 18 * s, -18 * s); ctx.lineTo(dir * 22 * s, -30 * s); ctx.lineTo(dir * 24 * s, -18 * s);
+    ctx.closePath(); ctx.fill();
+    // Eyes (red glow)
+    ctx.fillStyle = '#F44336';
+    ctx.shadowColor = '#F44336';
+    ctx.shadowBlur = 12;
+    ctx.beginPath(); ctx.arc(dir * 19 * s, -12 * s, 3.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFEB3B';
+    ctx.beginPath(); ctx.arc(dir * 19.5 * s, -12.5 * s, 1.5 * s, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Fire breath
+    if (frame % 10 < 5) {
+      ctx.fillStyle = 'rgba(180,0,255,0.4)';
+      ctx.beginPath();
+      ctx.arc(dir * 28 * s, -8 * s, 5 + Math.random() * 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Tail
+    ctx.strokeStyle = c;
+    ctx.lineWidth = 5 * s;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-dir * 16 * s, 6 * s);
+    ctx.quadraticCurveTo(-dir * 28 * s, 0, -dir * 34 * s, -10 * s + Math.sin(frame * 0.08) * 5);
+    ctx.stroke();
+    ctx.fillStyle = '#B71C1C';
+    const ttx = -dir * 34 * s, tty = -10 * s + Math.sin(frame * 0.08) * 5;
+    ctx.beginPath();
+    ctx.moveTo(ttx, tty - 5 * s); ctx.lineTo(ttx - dir * 6 * s, tty); ctx.lineTo(ttx, tty + 5 * s);
+    ctx.closePath(); ctx.fill();
+  }
+
+  ctx.restore();
+
+  // HP bar
+  if (hp < maxHp) {
+    const bw = type.w * 0.8;
+    ctx.fillStyle = '#333';
+    ctx.fillRect(x - bw/2, y - type.h/2 - 8 + bounce, bw, 4);
+    ctx.fillStyle = hp/maxHp > 0.5 ? '#F44336' : hp/maxHp > 0.25 ? '#FF9800' : '#B71C1C';
+    ctx.fillRect(x - bw/2, y - type.h/2 - 8 + bounce, bw * (hp/maxHp), 4);
+  }
+}
+
+function shadeColor(hex, percent) {
+  const num = parseInt(hex.replace('#',''), 16);
+  const r = Math.min(255, Math.max(0, (num >> 16) + percent));
+  const g = Math.min(255, Math.max(0, ((num >> 8) & 0xFF) + percent));
+  const b = Math.min(255, Math.max(0, (num & 0xFF) + percent));
+  return `rgb(${r},${g},${b})`;
+}
+
+// ======== BASE DRAWING ========
+function drawCastle(x, y, hp, maxHp, isPlayer) {
+  const ratio = hp / maxHp;
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Castle base
+  const baseColor = isPlayer ? '#5C6BC0' : '#C62828';
+  const wallColor = isPlayer ? '#7986CB' : '#E53935';
+  const roofColor = isPlayer ? '#3F51B5' : '#B71C1C';
+
+  // Main wall
+  ctx.fillStyle = wallColor;
+  ctx.fillRect(-30, -50, 60, 60);
+
+  // Towers
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(-38, -65, 18, 75);
+  ctx.fillRect(20, -65, 18, 75);
+
+  // Roofs
+  ctx.fillStyle = roofColor;
+  ctx.beginPath();
+  ctx.moveTo(-42, -65); ctx.lineTo(-29, -82); ctx.lineTo(-16, -65);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(16, -65); ctx.lineTo(29, -82); ctx.lineTo(42, -65);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-25, -50); ctx.lineTo(0, -68); ctx.lineTo(25, -50);
+  ctx.closePath(); ctx.fill();
+
+  // Battlements
+  ctx.fillStyle = wallColor;
+  for (let i = -35; i < 35; i += 10) {
+    ctx.fillRect(i, -55, 6, 8);
+  }
+
+  // Gate
+  ctx.fillStyle = '#3E2723';
+  ctx.beginPath();
+  ctx.arc(0, 10, 12, Math.PI, 0);
+  ctx.fillRect(-12, -2, 24, 12);
+  ctx.fill();
+
+  // Windows
+  ctx.fillStyle = '#FFF176';
+  ctx.fillRect(-20, -38, 8, 10);
+  ctx.fillRect(12, -38, 8, 10);
+
+  // Flag
+  const flagWave = Math.sin(Date.now() / 300) * 0.2;
+  ctx.save();
+  ctx.translate(0, -68);
+  ctx.fillStyle = '#5D4037';
+  ctx.fillRect(-1, -20, 2, 20);
+  ctx.fillStyle = isPlayer ? '#2196F3' : '#F44336';
+  ctx.beginPath();
+  ctx.moveTo(1, -20);
+  ctx.quadraticCurveTo(10 + Math.sin(Date.now()/200) * 3, -15, 1 + Math.sin(Date.now()/250) * 2, -10);
+  ctx.lineTo(1, -10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  // Damage cracks
+  if (ratio < 0.7) {
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-15, -30); ctx.lineTo(-8, -20); ctx.lineTo(-12, -10); ctx.stroke();
+  }
+  if (ratio < 0.4) {
+    ctx.beginPath(); ctx.moveTo(10, -40); ctx.lineTo(15, -25); ctx.lineTo(8, -15); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(-25, -35, 10, 8);
+  }
+
+  // HP bar
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  drawRoundRect(-35, 18, 70, 12, 3, 'rgba(0,0,0,0.7)');
+  const hpColor = isPlayer
+    ? (ratio > 0.5 ? '#4CAF50' : ratio > 0.25 ? '#FFC107' : '#F44336')
+    : (ratio > 0.5 ? '#F44336' : ratio > 0.25 ? '#FF9800' : '#B71C1C');
+  if (ratio > 0) {
+    drawRoundRect(-34, 19, 68 * ratio, 10, 2, hpColor);
+  }
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 9px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${Math.ceil(hp)}/${maxHp}`, 0, 27);
+
+  ctx.restore();
+}
+
+// ======== PARTICLES ========
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    game.particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 6,
+      vy: -Math.random() * 5 - 2,
+      life: 1,
+      color,
+      size: 2 + Math.random() * 4,
+    });
+  }
+}
+
+function spawnDmgNumber(x, y, dmg, color) {
+  game.dmgNumbers.push({ x, y, dmg: Math.round(dmg), life: 1, color: color || '#FFF' });
+}
+
+// ======== GAME LOGIC ========
+function createUnit(typeData, side) {
+  return {
+    type: typeData,
+    side,
+    x: side === 'player' ? FIELD_LEFT : FIELD_RIGHT,
+    hp: typeData.hp,
+    maxHp: typeData.hp,
+    attackTimer: 0,
+    frame: Math.random() * 100 | 0,
+    state: 'walking',
+    knockback: 0,
+  };
+}
+
+function updateUnits(dt) {
+  const allPlayer = game.playerUnits;
+  const allEnemy = game.enemyUnits;
+
+  for (const u of allPlayer) {
+    u.frame++;
+    if (u.knockback > 0) { u.x -= 1; u.knockback -= dt; continue; }
+
+    let target = null;
+    let minDist = Infinity;
+    for (const e of allEnemy) {
+      const d = e.x - u.x;
+      if (d > 0 && d < minDist) { minDist = d; target = e; }
+    }
+    const distToBase = BASE_RIGHT_X - u.x;
+    if (distToBase < minDist) { target = 'base'; minDist = distToBase; }
+
+    if (minDist <= u.type.range) {
+      u.state = 'attacking';
+      u.attackTimer -= dt;
+      if (u.attackTimer <= 0) {
+        u.attackTimer = u.type.cooldown;
+        if (target === 'base') {
+          game.enemyBase.hp -= u.type.atk;
+          spawnDmgNumber(BASE_RIGHT_X, GROUND_Y - 30, u.type.atk, '#FF5252');
+          game.shakeX = 3;
+          SFX.baseHit();
+        } else {
+          target.hp -= u.type.atk;
+          target.knockback = 0.1;
+          spawnDmgNumber(target.x, GROUND_Y - target.type.h/2 - 10, u.type.atk, '#FFF');
+          SFX.attack();
+          if (target.hp <= 0) {
+            game.money = Math.min(game.maxMoney, game.money + target.type.money);
+            spawnParticles(target.x, GROUND_Y - target.type.h/2, target.type.color, 8);
+            SFX.enemyDie();
+          }
+        }
+      }
+    } else {
+      u.state = 'walking';
+      u.x += u.type.speed * dt * 60;
+    }
+  }
+
+  for (const e of allEnemy) {
+    e.frame++;
+    if (e.knockback > 0) { e.x += 1; e.knockback -= dt; continue; }
+
+    let target = null;
+    let minDist = Infinity;
+    for (const p of allPlayer) {
+      const d = e.x - p.x;
+      if (d > 0 && d < minDist) { minDist = d; target = p; }
+    }
+    const distToBase = e.x - BASE_LEFT_X;
+    if (distToBase < minDist) { target = 'base'; minDist = distToBase; }
+
+    if (minDist <= e.type.range) {
+      e.state = 'attacking';
+      e.attackTimer -= dt;
+      if (e.attackTimer <= 0) {
+        e.attackTimer = e.type.cooldown;
+        if (target === 'base') {
+          game.playerBase.hp -= e.type.atk;
+          spawnDmgNumber(BASE_LEFT_X, GROUND_Y - 30, e.type.atk, '#FF5252');
+          game.shakeX = 3;
+          SFX.baseHit();
+        } else {
+          target.hp -= e.type.atk;
+          target.knockback = 0.1;
+          spawnDmgNumber(target.x, GROUND_Y - target.type.h/2 - 10, e.type.atk, '#FF8A80');
+          SFX.attack();
+          if (target.hp <= 0) {
+            spawnParticles(target.x, GROUND_Y - target.type.h/2, target.type.color, 8);
+            SFX.dragonDie();
+          }
+        }
+      }
+    } else {
+      e.state = 'walking';
+      e.x -= e.type.speed * dt * 60;
+    }
+  }
+
+  game.playerUnits = game.playerUnits.filter(u => u.hp > 0);
+  game.enemyUnits = game.enemyUnits.filter(u => u.hp > 0);
+}
+
+function updateWaves(dt) {
+  game.stageTime += dt;
+  const stage = STAGES[game.stageIndex];
+  for (const wt of game.waveTimers) {
+    if (wt.done) continue;
+    if (game.stageTime >= wt.startTime) {
+      wt.timer -= dt;
+      if (wt.timer <= 0 && wt.spawned < wt.count) {
+        const eType = ENEMY_TYPES[wt.type];
+        game.enemyUnits.push(createUnit(eType, 'enemy'));
+        wt.spawned++;
+        wt.timer = wt.interval;
+        if (wt.spawned >= wt.count) wt.done = true;
+      }
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (const p of game.particles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 10 * dt;
+    p.life -= dt * 2;
+    p.size *= 0.98;
+  }
+  game.particles = game.particles.filter(p => p.life > 0);
+
+  for (const d of game.dmgNumbers) {
+    d.y -= 40 * dt;
+    d.life -= dt * 1.5;
+  }
+  game.dmgNumbers = game.dmgNumbers.filter(d => d.life > 0);
+}
+
+// ======== RENDER ========
+function render() {
+  const stage = STAGES[game.stageIndex];
+  ctx.save();
+  ctx.translate(game.shakeX * (Math.random() - 0.5), game.shakeY * (Math.random() - 0.5));
+  game.shakeX *= 0.9;
+  game.shakeY *= 0.9;
+
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  grad.addColorStop(0, stage.bg[0]);
+  grad.addColorStop(1, stage.bg[1]);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 960, GROUND_Y);
+
+  // Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  for (let i = 0; i < 5; i++) {
+    const cx = ((Date.now() / 50 + i * 200) % 1100) - 70;
+    const cy = 40 + i * 50;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 25, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + 20, cy - 5, 20, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx - 18, cy + 3, 18, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Ground
+  ctx.fillStyle = stage.ground;
+  ctx.fillRect(0, GROUND_Y, 960, 580 - GROUND_Y);
+  ctx.fillStyle = shadeColor(stage.ground, -20);
+  ctx.fillRect(0, GROUND_Y, 960, 4);
+  // Grass details
+  ctx.fillStyle = shadeColor(stage.ground, 20);
+  for (let i = 0; i < 960; i += 15) {
+    const h = 4 + Math.sin(i * 0.3) * 3;
+    ctx.fillRect(i, GROUND_Y - h, 3, h);
+  }
+
+  // Bases
+  drawCastle(BASE_LEFT_X, GROUND_Y, game.playerBase.hp, game.playerBase.maxHp, true);
+  drawCastle(BASE_RIGHT_X, GROUND_Y, game.enemyBase.hp, game.enemyBase.maxHp, false);
+
+  // Units (sorted by y for overlap)
+  for (const u of game.playerUnits) {
+    drawDragon(u.x, GROUND_Y - u.type.h/2, u.type, 1, u.frame, u.hp, u.maxHp);
+  }
+  for (const e of game.enemyUnits) {
+    drawEnemy(e.x, GROUND_Y - e.type.h/2, e.type, -1, e.frame, e.hp, e.maxHp);
+  }
+
+  // Particles
+  for (const p of game.particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  // Damage numbers
+  for (const d of game.dmgNumbers) {
+    ctx.globalAlpha = d.life;
+    ctx.font = `bold ${14 + (1 - d.life) * 6}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#000';
+    ctx.fillText(`-${d.dmg}`, d.x + 1, d.y + 1);
+    ctx.fillStyle = d.color;
+    ctx.fillText(`-${d.dmg}`, d.x, d.y);
+  }
+  ctx.globalAlpha = 1;
+
+  ctx.restore();
+
+  // ======== UI PANEL ========
+  // Top bar
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, 960, 42);
+
+  // Money
+  ctx.fillStyle = '#FFD54F';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('💰 ' + Math.floor(game.money), 16, 28);
+
+  // Money rate
+  ctx.fillStyle = '#BDBDBD';
+  ctx.font = '13px sans-serif';
+  ctx.fillText(`+${game.moneyRate}/s`, 140, 28);
+
+  // Stage name
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(stage.name, 480, 28);
+
+  // Timer
+  ctx.fillStyle = '#BDBDBD';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'right';
+  const mins = Math.floor(game.stageTime / 60);
+  const secs = Math.floor(game.stageTime % 60);
+  ctx.fillText(`${mins}:${secs.toString().padStart(2,'0')}`, 940, 28);
+
+  // Bottom panel
+  ctx.fillStyle = 'rgba(20,20,40,0.92)';
+  ctx.fillRect(0, PANEL_Y, 960, 580 - PANEL_Y);
+  ctx.fillStyle = 'rgba(255,255,255,0.1)';
+  ctx.fillRect(0, PANEL_Y, 960, 2);
+
+  // Dragon buttons
+  const btnCount = DRAGON_TYPES.length;
+  const btnW = 110;
+  const btnH = 108;
+  const gap = 6;
+  const startX = (960 - (btnW * btnCount + gap * (btnCount - 1))) / 2;
+
+  for (let i = 0; i < btnCount; i++) {
+    const dt = DRAGON_TYPES[i];
+    const bx = startX + i * (btnW + gap);
+    const by = PANEL_Y + 8;
+    const canAfford = game.money >= dt.cost;
+    const onCooldown = game.spawnCooldowns[i] > 0;
+    const available = canAfford && !onCooldown;
+
+    // Button background
+    const bgColor = available ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.3)';
+    drawRoundRect(bx, by, btnW, btnH, 8, bgColor);
+
+    // Colored accent
+    ctx.fillStyle = available ? dt.color : 'rgba(100,100,100,0.5)';
+    drawRoundRect(bx, by, btnW, 3, 2, ctx.fillStyle);
+
+    // Dragon icon (mini centered)
+    ctx.save();
+    ctx.translate(bx + btnW/2, by + 28);
+    ctx.scale(0.5, 0.5);
+    ctx.fillStyle = available ? dt.color : '#666';
+    ctx.beginPath(); ctx.ellipse(0, 0, 16, 12, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(14, -8, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(17, -10, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#333';
+    ctx.beginPath(); ctx.arc(18, -9.5, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFF59D';
+    ctx.beginPath();
+    ctx.moveTo(10, -15); ctx.lineTo(12, -22); ctx.lineTo(16, -14);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = available ? shadeColor(dt.color, 40) : '#888';
+    ctx.globalAlpha = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(-2, -6);
+    ctx.quadraticCurveTo(-10, -22, -2, -24);
+    ctx.quadraticCurveTo(4, -16, 4, -8);
+    ctx.closePath(); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Name
+    ctx.fillStyle = available ? '#FFF' : '#888';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(dt.name, bx + btnW/2, by + 56);
+
+    // Cost
+    ctx.fillStyle = canAfford ? '#FFD54F' : '#F44336';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillText(`💰${dt.cost}`, bx + btnW/2, by + 72);
+
+    // Stats
+    ctx.fillStyle = '#999';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(`♥${dt.hp} ⚔${dt.atk}`, bx + btnW/2, by + 86);
+
+    // Desc
+    ctx.fillStyle = available ? '#AAA' : '#666';
+    ctx.font = '9px sans-serif';
+    ctx.fillText(dt.desc, bx + btnW/2, by + 98);
+
+    // Cooldown overlay
+    if (onCooldown) {
+      const cdRatio = game.spawnCooldowns[i] / dt.spawnCd;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(bx, by + btnH * (1 - cdRatio), btnW, btnH * cdRatio);
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText(game.spawnCooldowns[i].toFixed(1) + 's', bx + btnW/2, by + btnH/2 + 5);
+    }
+
+    // Key hint
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(`[${i+1}]`, bx + btnW - 5, by + btnH - 4);
+    ctx.textAlign = 'left';
+  }
+}
+
+function renderTitle() {
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, 0, 580);
+  grad.addColorStop(0, '#1A237E');
+  grad.addColorStop(1, '#0D47A1');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 960, 580);
+
+  // Stars
+  for (let i = 0; i < 50; i++) {
+    const sx = (Math.sin(i * 43.7) * 0.5 + 0.5) * 960;
+    const sy = (Math.cos(i * 31.3) * 0.5 + 0.5) * 300;
+    const blink = Math.sin(Date.now() / 500 + i) * 0.5 + 0.5;
+    ctx.fillStyle = `rgba(255,255,255,${blink * 0.8})`;
+    ctx.beginPath(); ctx.arc(sx, sy, 1 + blink, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Title dragons
+  const t = Date.now() / 1000;
+  for (let i = 0; i < 3; i++) {
+    const dx = 200 + i * 280;
+    const dy = 200 + Math.sin(t + i) * 15;
+    const dt = DRAGON_TYPES[i * 2];
+    ctx.save();
+    ctx.translate(dx, dy);
+    ctx.scale(1.5, 1.5);
+    ctx.translate(-dx, -dy);
+    drawDragon(dx, dy, dt, 1, Date.now() / 16 + i * 50, dt.hp, dt.hp);
+    ctx.restore();
+  }
+
+  // Title text
+  ctx.shadowColor = '#FFD54F';
+  ctx.shadowBlur = 20;
+  ctx.fillStyle = '#FFD54F';
+  ctx.font = 'bold 56px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('🐉 ドラゴンディフェンス！', 480, 100);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#B3E5FC';
+  ctx.font = '20px sans-serif';
+  ctx.fillText('ドラゴンたちと一緒に敵の城を破壊しよう！', 480, 145);
+
+  // Stage buttons
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('ステージを選択', 480, 340);
+
+  for (let i = 0; i < STAGES.length; i++) {
+    const bx = 120 + i * 155;
+    const by = 360;
+    const bw = 140;
+    const bh = 70;
+    const unlocked = true;
+
+    if (unlocked) {
+      drawRoundRect(bx, by, bw, bh, 10, 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0.3)');
+      ctx.fillStyle = '#FFF';
+    } else {
+      drawRoundRect(bx, by, bw, bh, 10, 'rgba(0,0,0,0.4)', 'rgba(100,100,100,0.3)');
+      ctx.fillStyle = '#666';
+    }
+
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(STAGES[i].name, bx + bw/2, by + 28);
+
+    if (!unlocked) {
+      ctx.fillStyle = '#888';
+      ctx.font = '24px sans-serif';
+      ctx.fillText('🔒', bx + bw/2, by + 55);
+    } else {
+      ctx.fillStyle = '#FFD54F';
+      ctx.font = '12px sans-serif';
+      if (i < game.clearedStages) {
+        ctx.fillText('⭐ クリア済み', bx + bw/2, by + 52);
+      } else {
+        ctx.fillText('▶ 挑戦する', bx + bw/2, by + 52);
+      }
+    }
+  }
+
+  // Controls
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '14px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('操作: タップ or クリック or キー[1-8]でドラゴンを出撃！', 480, 480);
+  ctx.fillText('敵の城を破壊すればクリア！自分の城を守ろう！', 480, 505);
+}
+
+function renderResult(won) {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, 960, 580);
+
+  ctx.textAlign = 'center';
+  if (won) {
+    ctx.shadowColor = '#FFD54F';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = '#FFD54F';
+    ctx.font = 'bold 52px sans-serif';
+    ctx.fillText('🎉 ステージクリア！', 480, 230);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#B3E5FC';
+    ctx.font = '22px sans-serif';
+    ctx.fillText(`${STAGES[game.stageIndex].name} を攻略した！`, 480, 280);
+  } else {
+    ctx.shadowColor = '#F44336';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = '#F44336';
+    ctx.font = 'bold 52px sans-serif';
+    ctx.fillText('💀 ゲームオーバー...', 480, 230);
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#FFCDD2';
+    ctx.font = '22px sans-serif';
+    ctx.fillText('城が破壊されてしまった...', 480, 280);
+  }
+
+  drawRoundRect(380, 340, 200, 55, 12, 'rgba(255,255,255,0.15)', 'rgba(255,255,255,0.4)');
+  ctx.fillStyle = '#FFF';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('タイトルに戻る', 480, 375);
+}
+
+// ======== GAME FLOW ========
+function startStage(index) {
+  SFX.click();
+  SFX.startBGM();
+  game.state = 'playing';
+  game.stageIndex = index;
+  game.money = 500;
+  game.playerBase = { hp: 10000, maxHp: 10000 };
+  game.enemyBase = { hp: STAGES[index].baseHp, maxHp: STAGES[index].baseHp };
+  game.playerUnits = [];
+  game.enemyUnits = [];
+  game.particles = [];
+  game.dmgNumbers = [];
+  game.spawnCooldowns = [0,0,0,0,0];
+  game.stageTime = 0;
+  game.waveTimers = STAGES[index].waves.map(w => ({
+    ...w, startTime: w.time, timer: 0, spawned: 0, done: false
+  }));
+  game.shakeX = 0;
+  game.shakeY = 0;
+}
+
+function spawnDragon(index) {
+  if (game.state !== 'playing') return;
+  if (index >= DRAGON_TYPES.length) return;
+  const dt = DRAGON_TYPES[index];
+  if (game.money < dt.cost || game.spawnCooldowns[index] > 0) {
+    SFX.cantAfford();
+    return;
+  }
+  game.money -= dt.cost;
+  game.spawnCooldowns[index] = dt.spawnCd;
+  game.playerUnits.push(createUnit(dt, 'player'));
+  SFX.spawn();
+}
+
+// ======== RESPONSIVE RESIZE ========
+function resizeCanvas() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  const ratio = 960 / 580;
+  let cw, ch;
+  if (w / h > ratio) {
+    ch = h;
+    cw = h * ratio;
+  } else {
+    cw = w;
+    ch = w / ratio;
+  }
+  canvas.style.width = cw + 'px';
+  canvas.style.height = ch + 'px';
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ======== INPUT ========
+function handleInput(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = 960 / rect.width;
+  const scaleY = 580 / rect.height;
+  const mx = (clientX - rect.left) * scaleX;
+  const my = (clientY - rect.top) * scaleY;
+
+  if (game.state === 'title') {
+    for (let i = 0; i < STAGES.length; i++) {
+      const bx = 120 + i * 155;
+      const by = 360;
+      if (mx >= bx && mx <= bx + 140 && my >= by && my <= by + 70) {
+        startStage(i);
+        return;
+      }
+    }
+  } else if (game.state === 'playing') {
+    const btnCount = DRAGON_TYPES.length;
+    const btnW = 110;
+    const btnH = 108;
+    const gap = 6;
+    const startX = (960 - (btnW * btnCount + gap * (btnCount - 1))) / 2;
+    for (let i = 0; i < btnCount; i++) {
+      const bx = startX + i * (btnW + gap);
+      const by = PANEL_Y + 8;
+      if (mx >= bx && mx <= bx + btnW && my >= by && my <= by + btnH) {
+        spawnDragon(i);
+        return;
+      }
+    }
+  } else if (game.state === 'win' || game.state === 'lose') {
+    if (mx >= 380 && mx <= 580 && my >= 340 && my <= 395) {
+      SFX.click();
+      SFX.stopBGM();
+      game.state = 'title';
+    }
+  }
+}
+
+canvas.addEventListener('click', (e) => {
+  handleInput(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  const t = e.touches[0];
+  handleInput(t.clientX, t.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => { e.preventDefault(); }, { passive: false });
+
+document.addEventListener('keydown', (e) => {
+  if (game.state === 'playing') {
+    const key = parseInt(e.key);
+    if (key >= 1 && key <= 8) {
+      spawnDragon(key - 1);
+    }
+  }
+});
+
+// ======== MAIN LOOP ========
+function gameLoop(timestamp) {
+  if (!game.lastTime) game.lastTime = timestamp;
+  const dt = Math.min((timestamp - game.lastTime) / 1000, 0.05);
+  game.lastTime = timestamp;
+
+  if (game.state === 'playing') {
+    game.money = Math.min(game.maxMoney, game.money + game.moneyRate * dt);
+    for (let i = 0; i < DRAGON_TYPES.length; i++) {
+      game.spawnCooldowns[i] = Math.max(0, game.spawnCooldowns[i] - dt);
+    }
+    updateWaves(dt);
+    updateUnits(dt);
+    updateParticles(dt);
+
+    if (game.enemyBase.hp <= 0) {
+      game.enemyBase.hp = 0;
+      game.state = 'win';
+      if (game.stageIndex >= game.clearedStages) {
+        game.clearedStages = game.stageIndex + 1;
+      }
+      spawnParticles(BASE_RIGHT_X, GROUND_Y - 40, '#FFD54F', 30);
+      spawnParticles(BASE_RIGHT_X, GROUND_Y - 40, '#FF5252', 20);
+      SFX.stopBGM();
+      SFX.win();
+    }
+    if (game.playerBase.hp <= 0) {
+      game.playerBase.hp = 0;
+      game.state = 'lose';
+      SFX.stopBGM();
+      SFX.lose();
+    }
+  }
+
+  ctx.clearRect(0, 0, 960, 580);
+
+  if (game.state === 'title') {
+    renderTitle();
+  } else if (game.state === 'playing') {
+    render();
+  } else if (game.state === 'win') {
+    render();
+    updateParticles(dt);
+    renderResult(true);
+  } else if (game.state === 'lose') {
+    render();
+    renderResult(false);
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
